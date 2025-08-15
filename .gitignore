@@ -108,7 +108,8 @@ trading_alerts.txt
 stock_alerts.log
 *.csv
 *.json
-!config.json 
+!config.json
+models/
 
 # Reports and generated analysis files
 reports/*.txt

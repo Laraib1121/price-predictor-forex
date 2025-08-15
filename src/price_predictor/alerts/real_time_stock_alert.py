@@ -32,7 +32,14 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 class RealTimeStockPredictor:
-    def __init__(self, ticker: str, lookback_days: int = 60, prediction_hours: int = 4):
+    def __init__(
+        self,
+        ticker: str,
+        lookback_days: int = 60,
+        prediction_hours: int = 4,
+        model_dir: str = "models",
+        retrain_interval_hours: int = 24,
+    ):
         """
         Initialize the real-time stock predictor
         
@@ -47,8 +54,19 @@ class RealTimeStockPredictor:
         self.price_scaler = MinMaxScaler(feature_range=(0, 1))
         self.sentiment_scaler = MinMaxScaler(feature_range=(0, 1))
         self.model = None
-        self.last_training_date = None
         self.current_open_price = None
+        self.model_dir = model_dir
+        self.retrain_interval_hours = retrain_interval_hours
+        self.model_path = os.path.join(self.model_dir, f"{self.ticker}.h5")
+        self.last_training_time = None
+
+        # Load existing model if available
+        if os.path.exists(self.model_path):
+            try:
+                self.model = tf.keras.models.load_model(self.model_path)
+                logger.info(f"Loaded existing model from {self.model_path}")
+            except Exception as e:
+                logger.warning(f"Failed to load model from {self.model_path}: {e}")
         
     def get_historical_data(self, days: int = 365) -> pd.DataFrame:
         """Fetch historical stock data"""
@@ -217,14 +235,17 @@ class RealTimeStockPredictor:
     def train_model(self, force_retrain: bool = False) -> None:
         """Train the prediction model"""
         try:
-            # Check if we need to retrain (only retrain once per day unless forced)
-            today = datetime.now().date()
-            if (not force_retrain and 
-                self.last_training_date == today and 
-                self.model is not None):
-                logger.info("Model already trained today, skipping training")
+            # Check if we need to retrain based on configured interval
+            now = datetime.now()
+            if (
+                not force_retrain
+                and self.last_training_time is not None
+                and (now - self.last_training_time) < timedelta(hours=self.retrain_interval_hours)
+                and self.model is not None
+            ):
+                logger.info("Model recently trained, skipping retraining")
                 return
-            
+
             logger.info("Starting model training...")
             
             # Get data
@@ -273,8 +294,13 @@ class RealTimeStockPredictor:
             # Evaluate model
             test_loss, test_mae = self.model.evaluate(X_test, y_test, verbose=0)
             logger.info(f"Model training completed. Test MAE: {test_mae:.4f}")
-            
-            self.last_training_date = today
+
+            # Save model to disk
+            os.makedirs(self.model_dir, exist_ok=True)
+            self.model.save(self.model_path)
+            logger.info(f"Model saved to {self.model_path}")
+
+            self.last_training_time = now
             
         except Exception as e:
             logger.error(f"Error training model: {str(e)}")
