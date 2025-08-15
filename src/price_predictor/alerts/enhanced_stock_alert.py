@@ -52,7 +52,17 @@ class EnhancedStockPredictor:
         
         # Model
         self.model = None
-        self.last_training_date = None
+        self.model_dir = self.config.get('model_path', 'models')
+        self.model_path = os.path.join(self.model_dir, f"{self.ticker}.h5")
+        self.retrain_interval_hours = self.config.get('retrain_interval_hours', 24)
+        self.last_training_time = None
+
+        if os.path.exists(self.model_path):
+            try:
+                self.model = tf.keras.models.load_model(self.model_path)
+                logger.info(f"Loaded existing model from {self.model_path}")
+            except Exception as e:
+                logger.warning(f"Failed to load model from {self.model_path}: {e}")
         
         # Initialize Reddit client if credentials are available
         self.reddit_client = self.init_reddit_client()
@@ -737,14 +747,17 @@ class EnhancedStockPredictor:
     def train_model(self, force_retrain: bool = False) -> None:
         """Train the prediction model"""
         try:
-            # Check if we need to retrain
-            today = datetime.now().date()
-            if (not force_retrain and 
-                self.last_training_date == today and 
-                self.model is not None):
-                logger.info("Model already trained today, skipping training")
+            # Check if we need to retrain based on configured interval
+            now = datetime.now()
+            if (
+                not force_retrain
+                and self.last_training_time is not None
+                and (now - self.last_training_time) < timedelta(hours=self.retrain_interval_hours)
+                and self.model is not None
+            ):
+                logger.info("Model recently trained, skipping retraining")
                 return
-            
+
             logger.info("Starting model training...")
             
             # Get data
@@ -807,8 +820,13 @@ class EnhancedStockPredictor:
             # Evaluate model
             test_loss, test_mae = self.model.evaluate(X_test, y_test, verbose=0)
             logger.info(f"Model training completed. Test MAE: {test_mae:.4f}")
-            
-            self.last_training_date = today
+
+            # Save model to disk
+            os.makedirs(self.model_dir, exist_ok=True)
+            self.model.save(self.model_path)
+            logger.info(f"Model saved to {self.model_path}")
+
+            self.last_training_time = now
             
         except Exception as e:
             logger.error(f"Error training model: {str(e)}")
