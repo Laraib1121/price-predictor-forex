@@ -122,21 +122,86 @@ class RealTimeStockPredictor:
     def get_sentiment_data(self) -> pd.DataFrame:
         """Get sentiment data from Reddit and news sources"""
         try:
-            # For now, we'll create dummy sentiment data
-            # In a real implementation, you would integrate with Reddit API and news APIs
-            dates = pd.date_range(start=datetime.now() - timedelta(days=30), 
-                                end=datetime.now(), freq='D')
-            
-            sentiment_data = pd.DataFrame({
-                'date': dates,
-                'reddit_polarity': np.random.normal(0, 0.3, len(dates)),
-                'reddit_volume': np.random.randint(10, 100, len(dates)),
-                'news_polarity': np.random.normal(0, 0.2, len(dates)),
-                'news_volume': np.random.randint(5, 50, len(dates))
-            })
-            
+            # Load sentiment API configuration
+            config_path = os.path.join("configs", "config.json")
+            with open(config_path, "r") as f:
+                cfg = json.load(f)
+
+            providers = cfg.get("sentiment_providers", {})
+            reddit_cfg = providers.get("reddit", {})
+            news_cfg = providers.get("news", {})
+
+            reddit_df = pd.DataFrame()
+            if reddit_cfg.get("endpoint"):
+                try:
+                    reddit_url = reddit_cfg["endpoint"].format(ticker=self.ticker)
+                    headers = {"User-Agent": "price-predictor"}
+                    if reddit_cfg.get("api_key"):
+                        headers["Authorization"] = f"Bearer {reddit_cfg['api_key']}"
+                    response = requests.get(reddit_url, headers=headers, timeout=10)
+                    response.raise_for_status()
+                    posts = response.json().get("data", {}).get("children", [])
+                    records = {}
+                    for post in posts:
+                        data = post.get("data", {})
+                        created = datetime.utcfromtimestamp(
+                            data.get("created_utc", 0)).date()
+                        polarity = TextBlob(data.get("title", "")).sentiment.polarity
+                        rec = records.setdefault(created, {"polarity": 0.0, "count": 0})
+                        rec["polarity"] += polarity
+                        rec["count"] += 1
+                    reddit_df = pd.DataFrame([
+                        {
+                            "date": d,
+                            "reddit_polarity": v["polarity"] / v["count"],
+                            "reddit_volume": v["count"],
+                        }
+                        for d, v in records.items()
+                    ])
+                except Exception as e:
+                    logger.warning(f"Failed to fetch Reddit sentiment: {e}")
+
+            news_df = pd.DataFrame()
+            if news_cfg.get("endpoint"):
+                try:
+                    params = {
+                        "q": self.ticker,
+                        "apiKey": news_cfg.get("api_key", ""),
+                        "language": "en",
+                    }
+                    response = requests.get(news_cfg["endpoint"], params=params, timeout=10)
+                    response.raise_for_status()
+                    articles = response.json().get("articles", [])
+                    records = {}
+                    for article in articles:
+                        published = article.get("publishedAt")
+                        if not published:
+                            continue
+                        try:
+                            date = datetime.fromisoformat(published[:10]).date()
+                        except Exception:
+                            continue
+                        polarity = TextBlob(article.get("title", "")).sentiment.polarity
+                        rec = records.setdefault(date, {"polarity": 0.0, "count": 0})
+                        rec["polarity"] += polarity
+                        rec["count"] += 1
+                    news_df = pd.DataFrame([
+                        {
+                            "date": d,
+                            "news_polarity": v["polarity"] / v["count"],
+                            "news_volume": v["count"],
+                        }
+                        for d, v in records.items()
+                    ])
+                except Exception as e:
+                    logger.warning(f"Failed to fetch news sentiment: {e}")
+
+            if reddit_df.empty and news_df.empty:
+                return pd.DataFrame()
+
+            sentiment_data = pd.merge(reddit_df, news_df, on="date", how="outer").fillna(0)
             return sentiment_data
-            
+
         except Exception as e:
             logger.error(f"Error fetching sentiment data: {str(e)}")
             return pd.DataFrame()
@@ -151,25 +216,25 @@ class RealTimeStockPredictor:
                 'BB_Upper', 'BB_Lower', 'Volume_Ratio', 'Price_Change', 'Price_Change_5'
             ]
             
+            # Merge sentiment data with stock data on date
+            stock_data = stock_data.copy()
+            stock_data['date'] = stock_data['Date'].dt.date
+
             # Normalize price features
             price_features = stock_data[feature_columns].values
             normalized_price = self.price_scaler.fit_transform(price_features)
-            
-            # Prepare sentiment features
+
             if not sentiment_data.empty:
-                sentiment_features = sentiment_data[['reddit_polarity', 'reddit_volume', 
-                                                   'news_polarity', 'news_volume']].values
+                sentiment_data = sentiment_data.copy()
+                sentiment_data['date'] = pd.to_datetime(sentiment_data['date']).dt.date
+                merged = pd.merge(stock_data[['date']], sentiment_data,
+                                  on='date', how='left')
+                sentiment_cols = ['reddit_polarity', 'reddit_volume',
+                                  'news_polarity', 'news_volume']
+                merged[sentiment_cols] = merged[sentiment_cols].fillna(0)
+                sentiment_features = merged[sentiment_cols].values
                 normalized_sentiment = self.sentiment_scaler.fit_transform(sentiment_features)
-                
-                # Align sentiment data with stock data
-                sentiment_aligned = np.zeros((len(normalized_price), normalized_sentiment.shape[1]))
-                for i, date in enumerate(stock_data['Date']):
-                    sentiment_idx = sentiment_data['date'].dt.date == date.date()
-                    if sentiment_idx.any():
-                        sentiment_aligned[i] = normalized_sentiment[sentiment_idx.idxmax()]
-                
-                # Combine features
-                combined_features = np.hstack((normalized_price, sentiment_aligned))
+                combined_features = np.hstack((normalized_price, normalized_sentiment))
             else:
                 combined_features = normalized_price
             

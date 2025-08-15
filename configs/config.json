@@ -55,5 +55,15 @@
         "max_daily_change": 0.02,
         "max_intraday_change": 0.015,
         "confidence_dampening": 0.5
+    },
+    "sentiment_providers": {
+        "reddit": {
+            "api_key": "",
+            "endpoint": "https://www.reddit.com/r/{ticker}/search.json?q={ticker}&limit=50"
+        },
+        "news": {
+            "api_key": "",
+            "endpoint": "https://newsapi.org/v2/everything"
+        }
     }
-} 
+}
